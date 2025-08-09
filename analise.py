@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.datasets import load_iris
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score,classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -21,20 +21,169 @@ warnings.filterwarnings("ignore")
 
 def load_data(
     csv_path: Optional[str], target_col: Optional[str]
-    ) -> Tuple[pd.DataFrame, pd.Series]:
-        """Carrega dados de CSV ou usa o dataset Iris de exemplo."""
-            if csv_path:
-                    df = pd.read_csv(csv_path)
-                            if target_col is None:
-                                        raise ValueError("Quando usando CSV, --target é obrigatório.")
-                                                if target_col not in df.columns:
-                                                            raise ValueError(f"Coluna target '{target_col}' não encontrada no CSV.")
-                                                                    X = df.drop(columns=[target_col])
-                                                                            y = df[target_col]
-                                                                                    return X, y
-                                                                                        else:
-                                                                                                iris = load_iris(as_frame=True)
-                                                                                                        X = iris.frame.drop(columns=["target"])
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """Carrega dados de CSV ou usa o dataset Iris de exemplo."""
+    if csv_path:
+        df = pd.read_csv(csv_path)
+        if target_col is None:
+            raise ValueError("Quando usando CSV, --target é obrigatório.")
+        if target_col not in df.columns:
+            raise ValueError(f"Coluna target '{target_col}' não encontrada no CSV.")
+        X = df.drop(columns=[target_col])
+        y = df[target_col]
+        return X, y
+    else:
+        iris = load_iris(as_frame=True)
+        X = iris.frame.drop(columns=["target"])
+        y = iris.frame["target"]
+        return X, y
+
+
+def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
+    """Cria um ColumnTransformer que trata numéricos e categóricos."""
+    numeric_cols = X.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    categorical_cols = X.select_dtypes(
+        include=["object", "category", "bool"]
+    ).columns.tolist()
+
+    numeric_pipeline = Pipeline(
+        [("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]
+    )
+
+    categorical_pipeline = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse=False)),
+        ]
+    )
+
+    preprocessor = ColumnTransformer(
+        [
+            ("num", numeric_pipeline, numeric_cols),
+            ("cat", categorical_pipeline, categorical_cols),
+        ],
+        remainder="drop",
+    )
+
+    return preprocessor
+
+
+def build_model_pipeline(preprocessor: ColumnTransformer) -> Pipeline:
+    """Combina preprocessor com um classificador."""
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    pipe = Pipeline([("preproc", preprocessor), ("clf", clf)])
+    return pipe
+
+
+def hyperparameter_search(
+    pipe: Pipeline, X_train: pd.DataFrame, y_train: pd.Series, n_iter: int = 20
+) -> RandomizedSearchCV:
+    """Executa RandomizedSearchCV rápido para RandomForest."""
+    param_distributions = {
+        "clf__n_estimators": randint(50, 400),
+        "clf__max_depth": randint(3, 30),
+        "clf__min_samples_split": randint(2, 20),
+        "clf__min_samples_leaf": randint(1, 20),
+        "clf__max_features": ["sqrt", "log2", None],
+        "clf__bootstrap": [True, False],
+    }
+    search = RandomizedSearchCV(
+        pipe,
+        param_distributions=param_distributions,
+        n_iter=n_iter,
+        scoring="accuracy",
+        cv=5,
+        verbose=1,
+        n_jobs=-1,
+        random_state=42,
+    )
+    search.fit(X_train, y_train)
+    return search
+
+
+def evaluate_model(model, X_test: pd.DataFrame, y_test: pd.Series) -> None:
+    """Avalia o modelo e imprime métricas."""
+    preds = model.predict(X_test)
+    acc = accuracy_score(y_test, preds)
+    print(f"\nAcurácia: {acc:.4f}\n")
+    print("Relatório de classificação:")
+    print(classification_report(y_test, preds))
+    print("Matriz de confusão:")
+    print(confusion_matrix(y_test, preds))
+
+
+def save_model(model, out_path: str) -> None:
+    """Salva o modelo com joblib."""
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    joblib.dump(model, out_path)
+    print(f"\nModelo salvo em: {out_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pipeline ML de exemplo")
+    parser.add_argument(
+        "--data",
+        type=str,
+        default=None,
+        help="Caminho para CSV de entrada. Se omitido, usa Iris.",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        help="Nome da coluna target (obrigatório se --data for usado).",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default="modelo_final.joblib",
+        help="Caminho para salvar o modelo treinado.",
+    )
+    parser.add_argument(
+        "--test-size", type=float, default=0.2, help="Proporção do teste."
+    )
+    parser.add_argument(
+        "--search-iters",
+        type=int,
+        default=20,
+        help="Número de iterações RandomizedSearchCV.",
+    )
+    args = parser.parse_args()
+
+    print("Carregando dados...")
+    X, y = load_data(args.data, args.target)
+    print(f"Shape X: {X.shape}, y: {y.shape}")
+
+    print("Criando preprocessor...")
+    preproc = build_preprocessor(X)
+
+    print("Construindo pipeline...")
+    pipe = build_model_pipeline(preproc)
+
+    print("Dividindo em treino/teste...")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=args.test_size,
+        random_state=42,
+        stratify=y if len(np.unique(y)) > 1 else None,
+    )
+
+    print("Executando busca por hiperparâmetros (pode demorar)...")
+    search = hyperparameter_search(pipe, X_train, y_train, n_iter=args.search_iters)
+    print("\nMelhores parâmetros encontrados:")
+    print(search.best_params_)
+    print(f"Melhor score (CV): {search.best_score_:.4f}")
+
+    print("\nAvaliando no conjunto de teste...")
+    best_model = search.best_estimator_
+    evaluate_model(best_model, X_test, y_test)
+
+    save_model(best_model, args.out)
+
+
+if __name__ == "__main__":
+    main()                                                                                                        X = iris.frame.drop(columns=["target"])
                                                                                                                 y = iris.frame["target"]
                                                                                                                         return X, y
 
